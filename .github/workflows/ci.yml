@@ -171,7 +171,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -209,19 +209,22 @@ jobs:
     if: always()
     
     steps:
-      - name: Notify GitHub Deployment Status
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const deploymentStatus = '${{ needs.deploy.result }}' === 'success' ? 'success' : 'failure';
-            github.rest.repos.createDeploymentStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              deployment_id: ${{ needs.deploy.outputs.deployment_id }},
-              state: deploymentStatus,
-              description: `Deployment ${deploymentStatus}`,
-              environment_url: process.env.APPLICATION_URL || ''
-            });
+    - name: Notify GitHub Deployment Status
+      uses: actions/github-script@v6
+      env:
+        DEPLOYMENT_ID: ${{ needs.deploy.outputs.deployment_id }}
+        DEPLOY_RESULT: ${{ needs.deploy.result }}
+      with:
+        script: |
+          const deploymentStatus = process.env.DEPLOY_RESULT === 'success' ? 'success' : 'failure';
+          await github.rest.repos.createDeploymentStatus({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          deployment_id: parseInt(process.env.DEPLOYMENT_ID),
+          state: deploymentStatus,
+          description: `Deployment ${deploymentStatus}`,
+          environment_url: process.env.APPLICATION_URL || ''
+        });
 
   cleanup:
     name: Cleanup Old Images
