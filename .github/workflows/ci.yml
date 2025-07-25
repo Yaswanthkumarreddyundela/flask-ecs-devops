@@ -181,14 +181,14 @@ jobs:
     if: always()
     
     steps:
-    - name: Notify Slack
-      uses: 8398a7/action-slack@v3
-      with:
-        status: ${{ job.status }}
-        channel: '#deployments'
-        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
-        fields: repo,message,commit,author,action,eventName,ref,workflow
-      if: always() && secrets.SLACK_WEBHOOK_URL
+    # - name: Notify Slack
+    #   uses: 8398a7/action-slack@v3
+    #   with:
+    #     status: ${{ job.status }}
+    #     channel: '#deployments'
+    #     webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+    #     fields: repo,message,commit,author,action,eventName,ref,workflow
+      # if: always() && secrets.SLACK_WEBHOOK_URL
 
     - name: Create GitHub deployment status
       uses: actions/github-script@v6
