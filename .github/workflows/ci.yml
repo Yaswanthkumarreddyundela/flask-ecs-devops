@@ -164,7 +164,7 @@ jobs:
               environment: 'production',
               auto_merge: false
             });
-            return response.data.id;
+            core.setOutput('deployment_id', response.data.id);
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
