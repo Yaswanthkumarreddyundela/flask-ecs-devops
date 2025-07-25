@@ -145,8 +145,9 @@ jobs:
     needs: build-and-push
     if: github.ref == 'refs/heads/main'
     outputs:
-      deployment_id: ${{ steps.create_deployment.outputs.result }}
-
+      deployment_id: ${{ steps.create_deployment.outputs.deployment_id }}
+      application_url: ${{ steps.verify.outputs.application_url }}
+      
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -199,9 +200,11 @@ jobs:
           wait-for-service-stability: true
 
       - name: Verify deployment
+        id: verify
         run: |
-         echo "Deployment completed successfully!"
-         echo "Application URL: $(aws elbv2 describe-load-balancers --names flask-todo-app-alb --query 'LoadBalancers[0].DNSName' --output text)"
+          APP_URL=$(aws elbv2 describe-load-balancers --names flask-todo-app-alb --query 'LoadBalancers[0].DNSName' --output text)
+          echo "Application URL: $APP_URL"
+          echo "application_url=$APP_URL" >> $GITHUB_OUTPUT
 
   notify:
     name: Notify Deployment Status
@@ -210,23 +213,26 @@ jobs:
     if: always()
     
     steps:
-    - name: Notify GitHub Deployment Status
-      uses: actions/github-script@v6
-      env:
-        DEPLOYMENT_ID: ${{ needs.deploy.outputs.deployment_id }}
-        DEPLOY_RESULT: ${{ needs.deploy.result }}
-        APPLICATION_URL: ${{ steps.deploy.outputs.application_url || '' }}
-      with:
-        script: |
-          const deploymentStatus = process.env.DEPLOY_RESULT === 'success' ? 'success' : 'failure';
-          await github.rest.repos.createDeploymentStatus({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          deployment_id: parseInt(process.env.DEPLOYMENT_ID),
-          state: deploymentStatus,
-          description: `Deployment ${deploymentStatus}`,
-          environment_url: process.env.APPLICATION_URL});
+      - name: Debug Deployment ID
+        run: echo "deployment_id=${{ needs.deploy.outputs.deployment_id }}"
 
+      - name: Notify GitHub Deployment Status
+        uses: actions/github-script@v6
+        env:
+          DEPLOYMENT_ID: ${{ needs.deploy.outputs.deployment_id }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          APPLICATION_URL: ${{ needs.deploy.outputs.application_url || '' }}
+        with:
+          script: |
+            const deploymentStatus = process.env.DEPLOY_RESULT === 'success' ? 'success' : 'failure';
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: parseInt(process.env.DEPLOYMENT_ID),
+              state: deploymentStatus,
+              description: `Deployment ${deploymentStatus}`,
+              environment_url: process.env.APPLICATION_URL || null
+            });
 
   cleanup:
     name: Cleanup Old Images
