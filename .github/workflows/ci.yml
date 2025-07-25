@@ -165,7 +165,8 @@ jobs:
               environment: 'production',
               auto_merge: false
             });
-            core.setOutput('deployment_id', response.data.id);
+            console.log('Deployment created with ID:', response.data.id);
+            return response.data.id.toString();
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
@@ -213,26 +214,47 @@ jobs:
     if: always()
     
     steps:
-      - name: Debug Deployment ID
-        run: echo "deployment_id=${{ needs.deploy.outputs.deployment_id }}"
+      - name: Debug Deployment Information
+        run: |
+          echo "deployment_id=${{ needs.deploy.outputs.deployment_id }}"
+          echo "deploy_result=${{ needs.deploy.result }}"
+          echo "application_url=${{ needs.deploy.outputs.application_url }}"
 
       - name: Notify GitHub Deployment Status
         uses: actions/github-script@v6
+        if: needs.deploy.outputs.deployment_id != ''
         env:
           DEPLOYMENT_ID: ${{ needs.deploy.outputs.deployment_id }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           APPLICATION_URL: ${{ needs.deploy.outputs.application_url || '' }}
         with:
           script: |
+            const deploymentId = process.env.DEPLOYMENT_ID;
             const deploymentStatus = process.env.DEPLOY_RESULT === 'success' ? 'success' : 'failure';
-            await github.rest.repos.createDeploymentStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              deployment_id: parseInt(process.env.DEPLOYMENT_ID),
-              state: deploymentStatus,
-              description: `Deployment ${deploymentStatus}`,
-              environment_url: process.env.APPLICATION_URL || null
-            });
+            
+            console.log('Deployment ID:', deploymentId);
+            console.log('Deployment Status:', deploymentStatus);
+            console.log('Application URL:', process.env.APPLICATION_URL);
+            
+            if (!deploymentId || deploymentId === 'undefined' || deploymentId === 'null') {
+              console.log('No valid deployment ID found, skipping status update');
+              return;
+            }
+            
+            try {
+              await github.rest.repos.createDeploymentStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                deployment_id: parseInt(deploymentId),
+                state: deploymentStatus,
+                description: `Deployment ${deploymentStatus}`,
+                environment_url: process.env.APPLICATION_URL || null
+              });
+              console.log('Deployment status updated successfully');
+            } catch (error) {
+              console.error('Failed to update deployment status:', error);
+              throw error;
+            }
 
   cleanup:
     name: Cleanup Old Images
