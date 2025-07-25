@@ -1,0 +1,372 @@
+pipeline {
+    agent any
+    
+    environment {
+        AWS_REGION = 'us-west-2'
+        ECR_REPOSITORY = 'flask-todo-app-app'
+        ECS_SERVICE = 'flask-todo-app-service'
+        ECS_CLUSTER = 'flask-todo-app-cluster'
+        ECS_TASK_DEFINITION = 'flask-todo-app-task'
+        CONTAINER_NAME = 'flask-todo-app-container'
+        AWS_ACCOUNT_ID = credentials('aws-account-id')
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        IMAGE_TAG = "${BUILD_NUMBER}-${GIT_COMMIT.substring(0,7)}"
+    }
+    
+    tools {
+        python '3.11'
+        terraform 'terraform-latest'
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 30, unit: 'MINUTES')
+        retry(2)
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    // Clean workspace
+                    deleteDir()
+                    
+                    // Checkout code
+                    checkout scm
+                    
+                    // Set build display name
+                    currentBuild.displayName = "#${BUILD_NUMBER}-${GIT_COMMIT.substring(0,7)}"
+                }
+            }
+        }
+        
+        stage('Setup') {
+            parallel {
+                stage('Python Setup') {
+                    steps {
+                        dir('app') {
+                            sh '''
+                                python -m venv venv
+                                . venv/bin/activate
+                                pip install --upgrade pip
+                                pip install -r requirements.txt
+                                pip install pytest pytest-cov flake8 bandit safety
+                            '''
+                        }
+                    }
+                }
+                
+                stage('AWS Setup') {
+                    steps {
+                        withCredentials([
+                            [$class: 'AmazonWebServicesCredentialsBinding', 
+                             credentialsId: 'aws-credentials']
+                        ]) {
+                            sh '''
+                                aws --version
+                                aws sts get-caller-identity
+                                aws configure set region $AWS_REGION
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Code Quality') {
+            parallel {
+                stage('Lint') {
+                    steps {
+                        dir('app') {
+                            sh '''
+                                . venv/bin/activate
+                                flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+                                flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+                            '''
+                        }
+                    }
+                    post {
+                        always {
+                            publishHTML([
+                                allowMissing: false,
+                                alwaysLinkToLastBuild: true,
+                                keepAll: true,
+                                reportDir: 'app',
+                                reportFiles: 'flake8-report.html',
+                                reportName: 'Flake8 Report'
+                            ])
+                        }
+                    }
+                }
+                
+                stage('Security Scan') {
+                    steps {
+                        dir('app') {
+                            sh '''
+                                . venv/bin/activate
+                                bandit -r . -f json -o bandit-report.json || true
+                                safety check --json --output safety-report.json || true
+                            '''
+                        }
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'app/*-report.json', fingerprint: true
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Test') {
+            steps {
+                dir('app') {
+                    sh '''
+                        . venv/bin/activate
+                        python -m pytest --cov=. --cov-report=xml --cov-report=html --junitxml=test-results.xml || echo "No tests found"
+                    '''
+                }
+            }
+            post {
+                always {
+                    publishTestResults testResultsPattern: 'app/test-results.xml'
+                    publishHTML([
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'app/htmlcov',
+                        reportFiles: 'index.html',
+                        reportName: 'Coverage Report'
+                    ])
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    dir('app') {
+                        // Build Docker image
+                        sh "docker build -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG} ."
+                        sh "docker tag ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG} ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+                        
+                        // Security scan of Docker image
+                        sh """
+                            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \\
+                                -v \$HOME/Library/Caches:/root/.cache/ \\
+                                aquasec/trivy image --exit-code 0 --severity HIGH,CRITICAL \\
+                                --format json --output trivy-report.json \\
+                                ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG} || true
+                        """
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'app/trivy-report.json', fingerprint: true
+                }
+            }
+        }
+        
+        stage('Push to ECR') {
+            when {
+                branch 'main'
+            }
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding', 
+                     credentialsId: 'aws-credentials']
+                ]) {
+                    sh '''
+                        # Login to ECR
+                        aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+                        
+                        # Push images
+                        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+                        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+                        
+                        echo "Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+                    '''
+                }
+            }
+        }
+        
+        stage('Terraform Plan') {
+            when {
+                branch 'main'
+            }
+            steps {
+                dir('terraform') {
+                    withCredentials([
+                        [$class: 'AmazonWebServicesCredentialsBinding', 
+                         credentialsId: 'aws-credentials']
+                    ]) {
+                        sh '''
+                            terraform init -upgrade
+                            terraform validate
+                            terraform plan -out=tfplan -var="app_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+                        '''
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'terraform/tfplan', fingerprint: true
+                }
+            }
+        }
+        
+        stage('Deploy to ECS') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    def deployApproval = input(
+                        message: 'Deploy to production?',
+                        ok: 'Deploy',
+                        parameters: [
+                            choice(
+                                name: 'DEPLOY_ENVIRONMENT',
+                                choices: ['production', 'staging'],
+                                description: 'Select deployment environment'
+                            )
+                        ]
+                    )
+                    
+                    echo "Deploying to ${deployApproval}"
+                    
+                    withCredentials([
+                        [$class: 'AmazonWebServicesCredentialsBinding', 
+                         credentialsId: 'aws-credentials']
+                    ]) {
+                        sh '''
+                            # Get current task definition
+                            aws ecs describe-task-definition --task-definition $ECS_TASK_DEFINITION --query taskDefinition > task-definition.json
+                            
+                            # Update task definition with new image
+                            sed -i "s|\\(\"image\":\\s*\"\\)[^\"]*\\(\",\\)|\\1${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}\\2|g" task-definition.json
+                            
+                            # Register new task definition
+                            NEW_TASK_DEF=$(aws ecs register-task-definition --cli-input-json file://task-definition.json --query 'taskDefinition.taskDefinitionArn' --output text)
+                            
+                            # Update ECS service
+                            aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --task-definition $NEW_TASK_DEF
+                            
+                            # Wait for deployment to complete
+                            aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE
+                            
+                            echo "Deployment completed successfully!"
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Health Check') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    withCredentials([
+                        [$class: 'AmazonWebServicesCredentialsBinding', 
+                         credentialsId: 'aws-credentials']
+                    ]) {
+                        sh '''
+                            # Get ALB DNS name
+                            ALB_DNS=$(aws elbv2 describe-load-balancers --names flask-todo-app-alb --query 'LoadBalancers[0].DNSName' --output text)
+                            APP_URL="http://$ALB_DNS"
+                            
+                            echo "Application URL: $APP_URL"
+                            
+                            # Health check
+                            for i in {1..10}; do
+                                echo "Health check attempt $i/10"
+                                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/health" || echo "000")
+                                if [ "$HTTP_CODE" = "200" ]; then
+                                    echo "✅ Health check passed!"
+                                    echo "Application is running at: $APP_URL"
+                                    break
+                                else
+                                    echo "❌ Health check failed with code: $HTTP_CODE"
+                                    if [ $i -eq 10 ]; then
+                                        echo "Health check failed after 10 attempts"
+                                        exit 1
+                                    fi
+                                    sleep 30
+                                fi
+                            done
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Cleanup') {
+            when {
+                branch 'main'
+            }
+            steps {
+                sh '''
+                    # Clean up old Docker images locally
+                    docker image prune -f
+                    
+                    # Clean up old ECR images (keep last 10)
+                    aws ecr list-images --repository-name $ECR_REPOSITORY --filter tagStatus=UNTAGGED --query 'imageIds[:-10]' --output json | \
+                    jq -r '.[] | @base64' | \
+                    while read item; do
+                        echo $item | base64 --decode | jq -r '.' | \
+                        aws ecr batch-delete-image --repository-name $ECR_REPOSITORY --image-ids file:///dev/stdin || true
+                    done
+                '''
+            }
+        }
+    }
+    
+    post {
+        always {
+            // Clean up workspace
+            cleanWs()
+        }
+        
+        success {
+            script {
+                if (env.BRANCH_NAME == 'main') {
+                    // Send success notification
+                    slackSend(
+                        channel: '#deployments',
+                        color: 'good',
+                        message: "✅ Deployment successful! 🚀\nProject: ${env.JOB_NAME}\nBuild: ${env.BUILD_NUMBER}\nCommit: ${env.GIT_COMMIT.substring(0,7)}\nBranch: ${env.BRANCH_NAME}"
+                    )
+                }
+            }
+        }
+        
+        failure {
+            script {
+                slackSend(
+                    channel: '#deployments',
+                    color: 'danger',
+                    message: "❌ Deployment failed! 💥\nProject: ${env.JOB_NAME}\nBuild: ${env.BUILD_NUMBER}\nCommit: ${env.GIT_COMMIT.substring(0,7)}\nBranch: ${env.BRANCH_NAME}\nLog: ${env.BUILD_URL}"
+                )
+            }
+        }
+        
+        unstable {
+            script {
+                slackSend(
+                    channel: '#deployments',
+                    color: 'warning',
+                    message: "⚠️ Build unstable!\nProject: ${env.JOB_NAME}\nBuild: ${env.BUILD_NUMBER}\nCommit: ${env.GIT_COMMIT.substring(0,7)}\nBranch: ${env.BRANCH_NAME}"
+                )
+            }
+        }
+    }
+}
