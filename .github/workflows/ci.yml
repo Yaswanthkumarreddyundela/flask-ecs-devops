@@ -171,6 +171,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
           
 
       - name: Login to Amazon ECR
@@ -214,6 +215,7 @@ jobs:
       env:
         DEPLOYMENT_ID: ${{ needs.deploy.outputs.deployment_id }}
         DEPLOY_RESULT: ${{ needs.deploy.result }}
+        APPLICATION_URL: ${{ steps.deploy.outputs.application_url || '' }}
       with:
         script: |
           const deploymentStatus = process.env.DEPLOY_RESULT === 'success' ? 'success' : 'failure';
@@ -223,8 +225,8 @@ jobs:
           deployment_id: parseInt(process.env.DEPLOYMENT_ID),
           state: deploymentStatus,
           description: `Deployment ${deploymentStatus}`,
-          environment_url: process.env.APPLICATION_URL || ''
-        });
+          environment_url: process.env.APPLICATION_URL});
+
 
   cleanup:
     name: Cleanup Old Images
