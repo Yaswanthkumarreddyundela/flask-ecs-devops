@@ -1,4 +1,4 @@
-# Flask ECS DevOps
+# Auto-Deploy Flask App - ECS DevOps
 
 A complete DevOps pipeline for deploying a Flask application to AWS Elastic Container Service (ECS) using containerization and CI/CD practices.
 
